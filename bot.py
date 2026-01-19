@@ -2,135 +2,151 @@ import asyncio
 import json
 import random
 import logging
+import base64
+import aiohttp
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
-import aiofiles
-import aiohttp
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-# === НАСТРОЙКИ ===
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"  # Заменишь после создания бота
-ADMIN_IDS = [123456789]  # Твой ID в Telegram
-LOG_CHANNEL = "-1002123456789"  # ID канала для логов (создашь позже)
-
-# Имена для бота
+# === КОНФИГУРАЦИЯ ===
+BOT_TOKEN = "8400292600:AAEDv_L2A-xTFC2aiUn-2fOR4HNV4_iDMXo"
+ADMIN_IDS = [7539197809]
+LOG_CHANNEL = "-1003620475629"
 BOT_NAME = "Давинчикк 🎭"
-VERSION = "1.0"
 
-# Файлы данных (будут в GitHub)
-USERS_FILE = "https://raw.githubusercontent.com/ВАШ_ЛОГИН/davincikk-bot/main/users.json"
-FRIENDS_FILE = "https://raw.githubusercontent.com/ВАШ_ЛОГИН/davincikk-bot/main/friends.json"
-STATS_FILE = "https://raw.githubusercontent.com/ВАШ_ЛОГИН/davincikk-bot/main/stats.json"
+# GitHub настройки
+GITHUB_TOKEN = "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"
+GITHUB_USERNAME = "mirmahmedovf52-ui"
+GITHUB_REPO = "davincikk-6ot"
+DATA_FILE = "bot_data.json"
+GITHUB_API = "https://api.github.com"
 
-# Инициализация
+# === ИНИЦИАЛИЗАЦИЯ ===
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 logging.basicConfig(level=logging.INFO)
 
-# === СОСТОЯНИЯ (FSM) ===
+# === СОСТОЯНИЯ ===
 class UserStates(StatesGroup):
     menu = State()
-    profile_edit = State()
-    profile_set_gender = State()
-    profile_set_age = State()
-    profile_set_interests = State()
-    profile_set_bio = State()
     searching = State()
     in_chat = State()
+    profile_edit = State()
     admin_panel = State()
 
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
-active_searches = {}  # user_id: timestamp
-active_chats = {}     # user_id: partner_id
-user_profiles = {}    # user_id: profile_data
-user_data = {}        # user_id: all_data
-friends_data = {}     # user_id: [friend_ids]
-waiting_for_friend = {}  # user_id: waiting_for_id
+active_searches = {}    # {user_id: timestamp}
+active_chats = {}       # {user_id: partner_id}
+data_cache = {}         # Кэш данных
 
-# === ЗАГРУЗКА/СОХРАНЕНИЕ ДАННЫХ ИЗ GITHUB ===
-async def load_github_file(url):
-    """Загрузить JSON файл из GitHub"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    return await response.json()
-    except:
-        pass
-    return {}
+# === GITHUB API ===
+class GitHubDB:
+    def __init__(self):
+        self.headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json"
+        }
+        self.repo_url = f"{GITHUB_API}/repos/{GITHUB_USERNAME}/{GITHUB_REPO}/contents/{DATA_FILE}"
+    
+    async def load_data(self):
+        """Загрузить данные из GitHub"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self.repo_url, headers=self.headers) as resp:
+                    if resp.status == 200:
+                        content = await resp.json()
+                        file_content = base64.b64decode(content['content']).decode('utf-8')
+                        data = json.loads(file_content)
+                        logging.info(f"Данные загружены из GitHub. Пользователей: {len(data.get('users', {}))}")
+                        return data
+        except Exception as e:
+            logging.error(f"Ошибка загрузки из GitHub: {e}")
+        
+        # Если файла нет или ошибка - возвращаем базовую структуру
+        return {
+            "users": {},
+            "friends": {},
+            "stats": {
+                "total_users": 0,
+                "total_chats": 0,
+                "total_messages": 0
+            },
+            "settings": {
+                "bot_active": True,
+                "maintenance": False
+            }
+        }
+    
+    async def save_data(self, data):
+        """Сохранить данные в GitHub"""
+        try:
+            # Получаем текущий SHA файла
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self.repo_url, headers=self.headers) as resp:
+                    sha = None
+                    if resp.status == 200:
+                        file_info = await resp.json()
+                        sha = file_info.get('sha')
+                
+                # Подготавливаем данные
+                content = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+                encoded = base64.b64encode(content.encode('utf-8')).decode('utf-8')
+                
+                payload = {
+                    "message": f"Auto-update {datetime.now().isoformat()}",
+                    "content": encoded,
+                    "sha": sha,
+                    "branch": "main"
+                }
+                
+                # Отправляем обновление
+                async with session.put(self.repo_url, headers=self.headers, json=payload) as resp:
+                    if resp.status in [200, 201]:
+                        logging.info("Данные сохранены в GitHub")
+                        return True
+                    else:
+                        error_text = await resp.text()
+                        logging.error(f"Ошибка сохранения: {resp.status} - {error_text}")
+                        return False
+        except Exception as e:
+            logging.error(f"Ошибка сохранения в GitHub: {e}")
+            return False
 
-async def save_github_file(filename, data):
-    """Сохранить данные в файл (локально для демо)"""
-    # В реальности тут будет push в GitHub через API
-    # Но для начала сохраняем локально
-    async with aiofiles.open(filename, 'w', encoding='utf-8') as f:
-        await f.write(json.dumps(data, indent=2, ensure_ascii=False, default=str))
-    return True
+# Создаем экземпляр базы данных
+github_db = GitHubDB()
 
+# === РАБОТА С ДАННЫМИ ===
 async def load_all_data():
     """Загрузить все данные"""
-    global user_data, friends_data
-    
-    user_data = await load_github_file(USERS_FILE)
-    friends_data = await load_github_file(FRIENDS_FILE)
-    
-    # Если файлов нет - создаем базовые структуры
-    if not user_data:
-        user_data = {"users": {}, "stats": {"total": 0, "online": 0}}
-    if not friends_data:
-        friends_data = {}
-    
-    logging.info(f"Данные загружены. Пользователей: {len(user_data.get('users', {}))}")
+    global data_cache
+    data_cache = await github_db.load_data()
+    return data_cache
 
 async def save_all_data():
     """Сохранить все данные"""
-    await save_github_file("users.json", user_data)
-    await save_github_file("friends.json", friends_data)
-    await save_github_file("stats.json", {
-        "updated": datetime.now().isoformat(),
-        "total_users": len(user_data.get('users', {})),
-        "active_chats": len(active_chats) // 2,
-        "active_searches": len(active_searches)
-    })
+    return await github_db.save_data(data_cache)
 
-# === ЛОГИРОВАНИЕ ===
-async def log_action(action, user_id=None, details=""):
-    """Логировать действие в канал"""
-    try:
-        text = f"📊 {action}\n"
-        if user_id:
-            user = user_data.get('users', {}).get(str(user_id), {})
-            username = user.get('username', 'без username')
-            text += f"👤 ID: {user_id} (@{username})\n"
-        if details:
-            text += f"📝 {details}\n"
-        text += f"🕐 {datetime.now().strftime('%H:%M:%S')}"
-        
-        if LOG_CHANNEL:
-            await bot.send_message(LOG_CHANNEL, text)
-    except Exception as e:
-        logging.error(f"Ошибка логирования: {e}")
-
-# === КОМАНДЫ ===
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    username = message.from_user.username or "без username"
-    first_name = message.from_user.first_name or "Аноним"
+async def update_user(user_id, update_dict):
+    """Обновить данные пользователя"""
+    user_id_str = str(user_id)
     
-    # Регистрация/обновление пользователя
-    if str(user_id) not in user_data.get('users', {}):
-        user_data.setdefault('users', {})[str(user_id)] = {
+    if 'users' not in data_cache:
+        data_cache['users'] = {}
+    
+    if user_id_str not in data_cache['users']:
+        # Создаем нового пользователя
+        data_cache['users'][user_id_str] = {
             "id": user_id,
-            "username": username,
-            "first_name": first_name,
+            "username": "",
+            "first_name": "",
             "join_date": datetime.now().isoformat(),
             "last_seen": datetime.now().isoformat(),
             "profile": {
@@ -146,19 +162,88 @@ async def cmd_start(message: types.Message, state: FSMContext):
                 "chats": 0,
                 "messages": 0,
                 "friends": 0,
-                "rating": 5.0
+                "rating": 5.0,
+                "total_rating": 0,
+                "rating_count": 0
             },
             "is_banned": False,
-            "is_admin": user_id in ADMIN_IDS
+            "ban_reason": "",
+            "is_admin": user_id in ADMIN_IDS,
+            "warnings": 0
         }
-        user_data['stats']['total'] = len(user_data['users'])
-        await log_action("🆕 НОВЫЙ ПОЛЬЗОВАТЕЛЬ", user_id, f"{first_name} (@{username})")
-    else:
-        # Обновляем last_seen
-        user_data['users'][str(user_id)]['last_seen'] = datetime.now().isoformat()
-        user_data['users'][str(user_id)]['username'] = username
+        data_cache['stats']['total_users'] = len(data_cache['users'])
+    
+    # Обновляем поля
+    for key, value in update_dict.items():
+        if key in data_cache['users'][user_id_str]:
+            data_cache['users'][user_id_str][key] = value
+        elif key in ['username', 'first_name']:
+            data_cache['users'][user_id_str][key] = value
+    
+    data_cache['users'][user_id_str]['last_seen'] = datetime.now().isoformat()
     
     await save_all_data()
+    return data_cache['users'][user_id_str]
+
+async def add_friend(user_id, friend_id):
+    """Добавить друга"""
+    user_id_str = str(user_id)
+    friend_id_str = str(friend_id)
+    
+    if 'friends' not in data_cache:
+        data_cache['friends'] = {}
+    
+    if user_id_str not in data_cache['friends']:
+        data_cache['friends'][user_id_str] = []
+    
+    if friend_id_str not in data_cache['friends'][user_id_str]:
+        data_cache['friends'][user_id_str].append(friend_id_str)
+        
+        # Обновляем счетчики
+        if user_id_str in data_cache['users']:
+            data_cache['users'][user_id_str]['stats']['friends'] += 1
+        
+        await save_all_data()
+        return True
+    
+    return False
+
+async def get_user_friends(user_id):
+    """Получить друзей пользователя"""
+    user_id_str = str(user_id)
+    return data_cache.get('friends', {}).get(user_id_str, [])
+
+# === ЛОГИРОВАНИЕ ===
+async def log_action(action, user_id=None, details=""):
+    """Отправить лог в канал"""
+    try:
+        text = f"📊 {action}\n"
+        if user_id:
+            user = data_cache.get('users', {}).get(str(user_id), {})
+            username = user.get('username', 'без username')
+            text += f"👤 ID: {user_id} (@{username})\n"
+        if details:
+            text += f"📝 {details}\n"
+        text += f"🕐 {datetime.now().strftime('%H:%M:%S')}"
+        
+        await bot.send_message(LOG_CHANNEL, text)
+    except Exception as e:
+        logging.error(f"Ошибка логирования: {e}")
+
+# === КОМАНДЫ БОТА ===
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or "Аноним"
+    
+    # Обновляем данные пользователя
+    await update_user(user_id, {
+        "username": username,
+        "first_name": first_name
+    })
+    
+    await log_action("🆕 НОВЫЙ ПОЛЬЗОВАТЕЛЬ", user_id, f"{first_name} (@{username})")
     
     # Приветственное сообщение
     welcome_text = f"""
@@ -176,9 +261,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
 3. Общайся текстом, голосовыми, стикерами
 4. Добавляй понравившихся в друзья
 
-🎯 <b>Умный поиск:</b> по возрасту, полу, интересам
-👥 <b>Система друзей:</b> общайся с теми, кто понравился
-📊 <b>Статистика:</b> следи за своей активностью
+🎯 <b>Умный поиск</b> | 👥 <b>Система друзей</b> | 📊 <b>Статистика</b>
 
 <b>Выбери действие:</b>
 """
@@ -194,18 +277,17 @@ async def cmd_start(message: types.Message, state: FSMContext):
     
     await message.answer(welcome_text, reply_markup=keyboard)
     await state.set_state(UserStates.menu)
-    await log_action("🔘 START", user_id)
 
 @dp.message(Command("stop"))
 async def cmd_stop(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
-    # Если в чате - завершить
+    # Если в чате
     if user_id in active_chats:
         partner_id = active_chats[user_id]
         await end_chat(user_id, partner_id, "по команде /stop")
         await message.answer("✅ Диалог завершен.")
-    # Если в поиске - отменить
+    # Если в поиске
     elif user_id in active_searches:
         del active_searches[user_id]
         await message.answer("✅ Поиск отменен.")
@@ -213,6 +295,103 @@ async def cmd_stop(message: types.Message, state: FSMContext):
         await message.answer("Вы не в диалоге и не в поиске.")
     
     await state.set_state(UserStates.menu)
+
+@dp.message(Command("profile"))
+async def cmd_profile(message: types.Message):
+    user_id = message.from_user.id
+    user = data_cache.get('users', {}).get(str(user_id), {})
+    
+    if not user:
+        await message.answer("Сначала используйте /start")
+        return
+    
+    profile = user.get('profile', {})
+    stats = user.get('stats', {})
+    
+    profile_text = f"""
+👤 <b>Ваш профиль:</b>
+
+<b>Основное:</b>
+• Имя: {user.get('first_name', 'Не указано')}
+• Username: @{user.get('username', 'нет')}
+• ID: {user_id}
+
+<b>Профиль:</b>
+• Пол: {profile.get('gender', 'не указан')}
+• Возраст: {profile.get('age', 'не указан')}
+• Интересы: {', '.join(profile.get('interests', [])) or 'не указаны'}
+• О себе: {profile.get('bio', 'не указано')}
+
+<b>Статистика:</b>
+• Диалогов: {stats.get('chats', 0)}
+• Сообщений: {stats.get('messages', 0)}
+• Друзей: {stats.get('friends', 0)}
+• Рейтинг: {stats.get('rating', 5.0):.1f}/5.0
+"""
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Редактировать профиль", callback_data="profile_edit_menu")],
+        [InlineKeyboardButton(text="🔙 Назад в меню", callback_data="back_to_menu")]
+    ])
+    
+    await message.answer(profile_text, reply_markup=keyboard)
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    stats = data_cache.get('stats', {})
+    total_users = len(data_cache.get('users', {}))
+    online_count = len([u for u in data_cache.get('users', {}).values() 
+                       if (datetime.now() - datetime.fromisoformat(u.get('last_seen', '2023-01-01'))).seconds < 300])
+    
+    stats_text = f"""
+📊 <b>Общая статистика {BOT_NAME}:</b>
+
+👥 <b>Пользователи:</b>
+• Всего: {total_users}
+• Онлайн: {online_count}
+• В поиске: {len(active_searches)}
+• В диалогах: {len(active_chats) // 2}
+
+💬 <b>Активность:</b>
+• Всего диалогов: {stats.get('total_chats', 0)}
+• Всего сообщений: {stats.get('total_messages', 0)}
+
+🕐 <b>Время работы:</b>
+• Данные обновлены: {datetime.now().strftime('%H:%M:%S')}
+"""
+    
+    await message.answer(stats_text)
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    user_id = message.from_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await message.answer("⛔ Доступ запрещен!")
+        return
+    
+    stats = data_cache.get('stats', {})
+    total_users = len(data_cache.get('users', {}))
+    online_count = len([u for u in data_cache.get('users', {}).values() 
+                       if (datetime.now() - datetime.fromisoformat(u.get('last_seen', '2023-01-01'))).seconds < 300])
+    
+    admin_text = f"""
+🛠️ <b>Админ-панель {BOT_NAME}</b>
+
+📈 <b>Статистика:</b>
+• Всего пользователей: {total_users}
+• Онлайн сейчас: {online_count}
+• Активных диалогов: {len(active_chats) // 2}
+• В поиске: {len(active_searches)}
+
+⚙️ <b>Управление:</b>
+• /admin_stats - полная статистика
+• /admin_users - управление пользователями
+• /admin_broadcast - рассылка сообщений
+• /admin_backup - резервное копирование
+"""
+    
+    await message.answer(admin_text)
 
 # === ОБРАБОТЧИКИ КНОПОК ===
 @dp.callback_query(F.data == "search_start")
@@ -230,66 +409,58 @@ async def search_start(callback: types.CallbackQuery, state: FSMContext):
     # Добавляем в поиск
     active_searches[user_id] = datetime.now()
     
-    # Клавиатура поиска
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎯 Быстрый поиск", callback_data="search_quick")],
-        [InlineKeyboardButton(text="🔍 По критериям", callback_data="search_criteria")],
-        [InlineKeyboardButton(text="👥 Среди друзей", callback_data="search_friends")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="search_cancel")]
-    ])
-    
     await callback.message.edit_text(
-        "🔍 <b>Выбери тип поиска:</b>\n\n"
-        "• <b>Быстрый поиск</b> - любой собеседник\n"
-        "• <b>По критериям</b> - по полу/возрасту/интересам\n"
-        "• <b>Среди друзей</b> - только из списка друзей",
-        reply_markup=keyboard
-    )
-    await state.set_state(UserStates.searching)
-    await callback.answer()
-
-@dp.callback_query(F.data == "search_quick")
-async def search_quick(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    
-    await callback.message.edit_text(
-        "🔄 <b>Ищем случайного собеседника...</b>\n"
-        "Ожидание: 0-30 секунд\n\n"
-        "Используй /stop чтобы отменить."
+        "🔍 <b>Ищем собеседника...</b>\n\n"
+        "Ожидание: до 30 секунд\n"
+        "Используй /stop чтобы отменить.\n\n"
+        "<i>Поиск активных пользователей...</i>"
     )
     
     # Ищем пару
     found = False
     for other_id, search_time in list(active_searches.items()):
         if other_id != user_id and (datetime.now() - search_time).seconds < 60:
-            # Нашли пару!
             await start_chat(user_id, other_id)
             found = True
             break
     
     if not found:
-        # Если не нашли сразу - ждем 30 секунд
-        await asyncio.sleep(30)
+        await asyncio.sleep(5)
         if user_id in active_searches:
-            # Проверяем снова
             for other_id, search_time in list(active_searches.items()):
                 if other_id != user_id:
                     await start_chat(user_id, other_id)
                     found = True
                     break
-            
-            if not found:
-                await callback.message.edit_text(
-                    "😔 <b>Собеседник не найден</b>\n\n"
-                    "Попробуй позже или выбери другой тип поиска."
-                )
-                if user_id in active_searches:
-                    del active_searches[user_id]
+        
+        if not found and user_id in active_searches:
+            await asyncio.sleep(25)
+            if user_id in active_searches:
+                for other_id, search_time in list(active_searches.items()):
+                    if other_id != user_id:
+                        await start_chat(user_id, other_id)
+                        found = True
+                        break
+                
+                if not found:
+                    await callback.message.edit_text(
+                        "😔 <b>Собеседник не найден</b>\n\n"
+                        "Попробуй позже или пригласи друзей!"
+                    )
+                    if user_id in active_searches:
+                        del active_searches[user_id]
+    
+    await callback.answer()
 
 @dp.callback_query(F.data == "profile_view")
-async def profile_view(callback: types.CallbackQuery, state: FSMContext):
+async def profile_view(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    user = user_data.get('users', {}).get(str(user_id), {})
+    user = data_cache.get('users', {}).get(str(user_id), {})
+    
+    if not user:
+        await callback.answer("Сначала используйте /start", show_alert=True)
+        return
+    
     profile = user.get('profile', {})
     stats = user.get('stats', {})
     
@@ -299,27 +470,23 @@ async def profile_view(callback: types.CallbackQuery, state: FSMContext):
 <b>Основное:</b>
 • Имя: {user.get('first_name', 'Не указано')}
 • Username: @{user.get('username', 'нет')}
-• Дата регистрации: {user.get('join_date', '?')[:10]}
+• ID: {user_id}
 
-<b>Настройки профиля:</b>
+<b>Профиль:</b>
 • Пол: {profile.get('gender', 'не указан')}
 • Возраст: {profile.get('age', 'не указан')}
 • Интересы: {', '.join(profile.get('interests', [])) or 'не указаны'}
 • О себе: {profile.get('bio', 'не указано')}
 
-<b>Предпочтения для поиска:</b>
-• Предпочитаемый пол: {profile.get('preferred_gender', 'любой')}
-• Возраст: от {profile.get('preferred_age_min', 18)} до {profile.get('preferred_age_max', 45)}
-
 <b>Статистика:</b>
 • Диалогов: {stats.get('chats', 0)}
 • Сообщений: {stats.get('messages', 0)}
 • Друзей: {stats.get('friends', 0)}
-• Рейтинг: {stats.get('rating', 5.0)}/5.0
+• Рейтинг: {stats.get('rating', 5.0):.1f}/5.0
 """
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Редактировать профиль", callback_data="profile_edit")],
+        [InlineKeyboardButton(text="✏️ Редактировать", callback_data="profile_edit_menu")],
         [InlineKeyboardButton(text="⚙️ Настройки поиска", callback_data="search_settings")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
     ])
@@ -328,22 +495,23 @@ async def profile_view(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 @dp.callback_query(F.data == "admin_panel")
-async def admin_panel(callback: types.CallbackQuery, state: FSMContext):
+async def admin_panel(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     
     if user_id not in ADMIN_IDS:
         await callback.answer("⛔ Доступ запрещен!", show_alert=True)
         return
     
-    stats = user_data.get('stats', {})
-    online_count = len([u for u in user_data.get('users', {}).values() 
+    stats = data_cache.get('stats', {})
+    total_users = len(data_cache.get('users', {}))
+    online_count = len([u for u in data_cache.get('users', {}).values() 
                        if (datetime.now() - datetime.fromisoformat(u.get('last_seen', '2023-01-01'))).seconds < 300])
     
     admin_text = f"""
 🛠️ <b>Админ-панель {BOT_NAME}</b>
 
 <b>Статистика:</b>
-• Всего пользователей: {stats.get('total', 0)}
+• Всего пользователей: {total_users}
 • Онлайн сейчас: {online_count}
 • Активных диалогов: {len(active_chats) // 2}
 • В поиске: {len(active_searches)}
@@ -354,14 +522,13 @@ async def admin_panel(callback: types.CallbackQuery, state: FSMContext):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Полная статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="👥 Управление пользователями", callback_data="admin_users")],
-        [InlineKeyboardButton(text="🔄 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="📢 Рассылка сообщений", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="💾 Резервное копирование", callback_data="admin_backup")],
         [InlineKeyboardButton(text="⚙️ Настройки бота", callback_data="admin_settings")],
-        [InlineKeyboardButton(text="📁 Экспорт данных", callback_data="admin_export")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
     ])
     
     await callback.message.edit_text(admin_text, reply_markup=keyboard)
-    await state.set_state(UserStates.admin_panel)
     await callback.answer()
 
 @dp.callback_query(F.data == "friends_list")
@@ -369,7 +536,7 @@ async def friends_list(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     user_id_str = str(user_id)
     
-    friends = friends_data.get(user_id_str, [])
+    friends = await get_user_friends(user_id)
     
     if not friends:
         text = "👥 <b>У вас пока нет друзей.</b>\n\nДобавляйте понравившихся собеседников после диалога!"
@@ -380,24 +547,24 @@ async def friends_list(callback: types.CallbackQuery):
     else:
         text = "👥 <b>Ваши друзья:</b>\n\n"
         
-        # Показываем первых 5 друзей
-        for i, friend_id in enumerate(friends[:5], 1):
-            friend = user_data.get('users', {}).get(friend_id, {})
+        # Показываем друзей
+        for friend_id in friends[:10]:
+            friend = data_cache.get('users', {}).get(friend_id, {})
             name = friend.get('first_name', f'Пользователь {friend_id}')
             username = friend.get('username', '')
             online = "🟢" if (datetime.now() - datetime.fromisoformat(friend.get('last_seen', '2023-01-01'))).seconds < 300 else "⚫"
             
-            text += f"{i}. {online} {name}"
+            text += f"{online} {name}"
             if username:
                 text += f" (@{username})"
-            text += f" [ID: {friend_id}]\n"
+            text += f"\n"
         
-        if len(friends) > 5:
-            text += f"\n...и еще {len(friends) - 5} друзей"
+        if len(friends) > 10:
+            text += f"\n...и еще {len(friends) - 10} друзей"
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💬 Написать другу", callback_data="friend_chat")],
-            [InlineKeyboardButton(text="📋 Полный список", callback_data="friends_all")],
+            [InlineKeyboardButton(text="💬 Начать диалог с другом", callback_data="chat_with_friend")],
+            [InlineKeyboardButton(text="📋 Все друзья", callback_data="friends_all")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
         ])
     
@@ -424,8 +591,11 @@ async def start_chat(user1_id, user2_id):
     # Обновляем статистику
     for uid in [user1_id, user2_id]:
         uid_str = str(uid)
-        if uid_str in user_data.get('users', {}):
-            user_data['users'][uid_str]['stats']['chats'] = user_data['users'][uid_str]['stats'].get('chats', 0) + 1
+        if uid_str in data_cache.get('users', {}):
+            data_cache['users'][uid_str]['stats']['chats'] += 1
+    
+    data_cache['stats']['total_chats'] = data_cache['stats'].get('total_chats', 0) + 1
+    await save_all_data()
     
     # Сообщения пользователям
     chat_start_text = """
@@ -443,7 +613,6 @@ async def start_chat(user1_id, user2_id):
 • Стикеры и GIF
 
 🛡️ <b>Безопасность:</b>
-• Ваши данные защищены
 • Чтобы пожаловаться - используйте /report
 • Чтобы завершить - /stop
 
@@ -454,9 +623,7 @@ async def start_chat(user1_id, user2_id):
         await bot.send_message(user1_id, chat_start_text)
         await bot.send_message(user2_id, chat_start_text)
         
-        # Логируем
-        await log_action("🔗 НАЧАЛСЯ ДИАЛОГ", None, 
-                        f"{user1_id} ↔ {user2_id}")
+        await log_action("🔗 НАЧАЛСЯ ДИАЛОГ", None, f"{user1_id} ↔ {user2_id}")
     except Exception as e:
         logging.error(f"Ошибка начала чата: {e}")
 
@@ -476,15 +643,14 @@ async def end_chat(user1_id, user2_id, reason="неизвестно"):
         
         # Кнопка "Добавить в друзья"
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Добавить в друзья", callback_data=f"add_friend_{user1_id if user2_id == user1_id else user2_id}")]
+            [InlineKeyboardButton(text="➕ Добавить в друзья", 
+                                callback_data=f"add_friend_{user2_id if user1_id == user1_id else user1_id}")]
         ])
         
         await bot.send_message(user1_id, "Хотите добавить собеседника в друзья?", reply_markup=keyboard)
         await bot.send_message(user2_id, "Хотите добавить собеседника в друзья?", reply_markup=keyboard)
         
-        # Логируем
-        await log_action("🔴 ДИАЛОГ ЗАВЕРШЕН", None, 
-                        f"{user1_id} ↔ {user2_id}\nПричина: {reason}")
+        await log_action("🔴 ДИАЛОГ ЗАВЕРШЕН", None, f"{user1_id} ↔ {user2_id}\nПричина: {reason}")
     except Exception as e:
         logging.error(f"Ошибка завершения чата: {e}")
 
@@ -499,16 +665,18 @@ async def handle_private_message(message: types.Message):
         
         # Обновляем статистику
         uid_str = str(user_id)
-        if uid_str in user_data.get('users', {}):
-            user_data['users'][uid_str]['stats']['messages'] = user_data['users'][uid_str]['stats'].get('messages', 0) + 1
+        if uid_str in data_cache.get('users', {}):
+            data_cache['users'][uid_str]['stats']['messages'] += 1
+        
+        data_cache['stats']['total_messages'] = data_cache['stats'].get('total_messages', 0) + 1
+        await save_all_data()
         
         # Логируем
         msg_preview = message.text or message.caption or f"[{message.content_type}]"
         if len(msg_preview) > 50:
             msg_preview = msg_preview[:50] + "..."
         
-        await log_action("📨 СООБЩЕНИЕ", user_id, 
-                        f"→ {partner_id}\n{msg_preview}")
+        await log_action("📨 СООБЩЕНИЕ", user_id, f"→ {partner_id}\n{msg_preview}")
         
         try:
             # Пересылаем сообщение
@@ -544,38 +712,23 @@ async def add_friend_handler(callback: types.CallbackQuery):
         friend_id = int(callback.data.replace("add_friend_", ""))
         user_id = callback.from_user.id
         
-        user_id_str = str(user_id)
-        friend_id_str = str(friend_id)
+        success = await add_friend(user_id, friend_id)
         
-        # Инициализируем если нет
-        if user_id_str not in friends_data:
-            friends_data[user_id_str] = []
-        
-        # Проверяем, не добавлен ли уже
-        if friend_id_str in friends_data[user_id_str]:
+        if success:
+            await callback.answer("✅ Добавлено в друзья!", show_alert=True)
+            
+            # Уведомляем другого пользователя
+            try:
+                await bot.send_message(friend_id, 
+                                      f"🎉 <b>Вас добавили в друзья!</b>\n\n"
+                                      f"Пользователь ID: {user_id}\n"
+                                      f"Теперь вы можете начинать диалог без поиска.")
+            except:
+                pass
+            
+            await log_action("➕ ДРУГ ДОБАВЛЕН", user_id, f"добавил {friend_id}")
+        else:
             await callback.answer("❌ Уже в друзьях!", show_alert=True)
-            return
-        
-        # Добавляем
-        friends_data[user_id_str].append(friend_id_str)
-        
-        # Обновляем статистику
-        if user_id_str in user_data.get('users', {}):
-            user_data['users'][user_id_str]['stats']['friends'] = user_data['users'][user_id_str]['stats'].get('friends', 0) + 1
-        
-        await save_all_data()
-        await callback.answer("✅ Добавлено в друзья!", show_alert=True)
-        
-        # Уведомляем другого пользователя
-        try:
-            await bot.send_message(friend_id, 
-                                  f"🎉 <b>Вас добавили в друзья!</b>\n\n"
-                                  f"Пользователь ID: {user_id}\n"
-                                  f"Теперь вы можете начинать диалог без поиска.")
-        except:
-            pass
-        
-        await log_action("➕ ДРУГ ДОБАВЛЕН", user_id, f"добавил {friend_id}")
         
     except Exception as e:
         logging.error(f"Ошибка добавления друга: {e}")
@@ -583,11 +736,24 @@ async def add_friend_handler(callback: types.CallbackQuery):
 
 # === ЗАПУСК БОТА ===
 async def main():
-    # Загружаем данные
+    # Загружаем данные из GitHub
     await load_all_data()
     
+    logging.info(f"=== Бот {BOT_NAME} запущен ===")
+    logging.info(f"Админ ID: {ADMIN_IDS}")
+    logging.info(f"Логи в канал: {LOG_CHANNEL}")
+    logging.info(f"GitHub репозиторий: {GITHUB_USERNAME}/{GITHUB_REPO}")
+    
+    # Отправляем сообщение о запуске
+    try:
+        await bot.send_message(LOG_CHANNEL, 
+                              f"🚀 <b>Бот {BOT_NAME} запущен!</b>\n"
+                              f"Версия: 1.0\n"
+                              f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    except:
+        pass
+    
     # Запускаем бота
-    logging.info(f"Бот {BOT_NAME} запускается...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
