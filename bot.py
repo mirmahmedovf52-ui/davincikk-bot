@@ -10,18 +10,19 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 import aiohttp
+from aiohttp import web
 
-# === КОНФИГУРАЦИЯ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
+# === КОНФИГУРАЦИЯ ===
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8400292600:AAEDv_L2A-xTFC2aiUn-2fOR4HNV4_iDMXo')
 ADMIN_IDS = list(map(int, os.getenv('ADMIN_IDS', '7539197809').split(',')))
 LOG_CHANNEL = os.getenv('LOG_CHANNEL', '-1003620475629')
 BOT_NAME = "Давинчикк 🎭"
 
-# GitHub настройки (для хранения данных)
+# GitHub для хранения данных
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN', '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')
 GITHUB_USERNAME = os.getenv('GITHUB_USERNAME', 'mirmahmedovf52-ui')
 GITHUB_REPO = os.getenv('GITHUB_REPO', 'davincikk-6ot')
-DATA_FILE = "bot_data.json"
+DATA_FILE = "data.json"
 
 # === ИНИЦИАЛИЗАЦИЯ ===
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -29,55 +30,40 @@ dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 
 # === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ===
-active_searches = {}    # {user_id: timestamp}
-active_chats = {}       # {user_id: partner_id}
-user_data = {}          # Данные пользователей
-friends_data = {}       # Данные друзей
+active_searches = {}  # {user_id: время начала поиска}
+active_chats = {}     # {user_id: partner_id}
+user_data = {}        # Данные пользователей
+friends_data = {}     # Данные друзей
 
-# === ХРАНЕНИЕ ДАННЫХ В GITHUB ===
-async def save_to_github(data):
-    """Сохранить данные в GitHub"""
-    try:
-        headers = {
-            "Authorization": f"token {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        
-        url = f"https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPO}/contents/{DATA_FILE}"
-        
-        # Получаем текущий SHA
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                sha = None
-                if resp.status == 200:
-                    file_info = await resp.json()
-                    sha = file_info.get('sha')
-            
-            # Подготавливаем данные
-            import base64
-            content = json.dumps(data, indent=2, ensure_ascii=False, default=str)
-            encoded = base64.b64encode(content.encode('utf-8')).decode('utf-8')
-            
-            payload = {
-                "message": f"Auto-update {datetime.now().isoformat()}",
-                "content": encoded,
-                "sha": sha,
-                "branch": "main"
-            }
-            
-            # Отправляем
-            async with session.put(url, headers=headers, json=payload) as resp:
-                if resp.status in [200, 201]:
-                    logging.info("✅ Данные сохранены в GitHub")
-                    return True
-                else:
-                    error = await resp.text()
-                    logging.error(f"❌ Ошибка сохранения: {resp.status} - {error}")
-                    return False
-    except Exception as e:
-        logging.error(f"❌ Ошибка GitHub: {e}")
-        return False
+# === ВЕБ-СЕРВЕР ДЛЯ RENDER ===
+async def health_check(request):
+    return web.Response(text=f"{BOT_NAME} is running! ✅ Time: {datetime.now().strftime('%H:%M:%S')}")
 
+async def start_web_server():
+    """Запуск веб-сервера на порту 10000"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 10000)
+    await site.start()
+    logging.info("✅ Веб-сервер запущен на порту 10000")
+
+# === KEEP-ALIVE СИСТЕМА ===
+async def keep_alive_ping():
+    """Отправляет запросы каждые 5 минут чтобы Render не засыпал"""
+    while True:
+        await asyncio.sleep(300)  # 5 минут
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get('http://localhost:10000/health') as resp:
+                    logging.info(f"🔄 Keep-alive ping: {resp.status}")
+        except Exception as e:
+            logging.error(f"❌ Keep-alive ошибка: {e}")
+
+# === РАБОТА С GITHUB ===
 async def load_from_github():
     """Загрузить данные из GitHub"""
     try:
@@ -89,7 +75,7 @@ async def load_from_github():
                     logging.info(f"✅ Данные загружены. Пользователей: {len(data.get('users', {}))}")
                     return data
     except Exception as e:
-        logging.error(f"❌ Ошибка загрузки: {e}")
+        logging.error(f"❌ Ошибка загрузки данных: {e}")
     
     # Если файла нет - создаем базовую структуру
     return {
@@ -99,60 +85,72 @@ async def load_from_github():
             "total_users": 0,
             "total_chats": 0,
             "total_messages": 0
-        },
-        "updated": datetime.now().isoformat()
+        }
     }
 
-# === ВЕБ-СЕРВЕР ДЛЯ RENDER ===
-from aiohttp import web
-
-async def handle_health_check(request):
-    """Эндпоинт для проверки работоспособности"""
-    return web.Response(text=f"{BOT_NAME} is running! ✅")
-
-async def start_web_server():
-    """Запуск веб-сервера для Render"""
-    app = web.Application()
-    app.router.add_get('/', handle_health_check)
-    app.router.add_get('/health', handle_health_check)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
-    await site.start()
-    logging.info("🌐 Веб-сервер запущен на порту 8080")
-
-# === КЕП-АЛАЙВ СИСТЕМА (чтобы Render не засыпал) ===
-async def keep_alive():
-    """Отправляет запросы самому себе каждые 5 минут"""
-    import aiohttp
-    while True:
-        await asyncio.sleep(300)  # 5 минут
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get('http://localhost:8080/health') as resp:
-                    logging.info(f"🔄 Keep-alive ping: {resp.status}")
-        except Exception as e:
-            logging.error(f"❌ Keep-alive ошибка: {e}")
+async def save_to_github():
+    """Сохранить данные в GitHub"""
+    try:
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        url = f"https://api.github.com/repos/{GITHUB_USERNAME}/{GITHUB_REPO}/contents/{DATA_FILE}"
+        
+        # Получаем текущий SHA файла
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                sha = None
+                if resp.status == 200:
+                    file_info = await resp.json()
+                    sha = file_info.get('sha')
+            
+            # Подготавливаем данные для сохранения
+            data_to_save = {
+                "users": user_data,
+                "friends": friends_data,
+                "stats": {
+                    "total_users": len(user_data),
+                    "total_chats": sum(u.get('stats', {}).get('chats', 0) for u in user_data.values()) // 2,
+                    "total_messages": sum(u.get('stats', {}).get('messages', 0) for u in user_data.values()),
+                    "updated": datetime.now().isoformat()
+                }
+            }
+            
+            import base64
+            content = json.dumps(data_to_save, indent=2, ensure_ascii=False, default=str)
+            encoded = base64.b64encode(content.encode('utf-8')).decode('utf-8')
+            
+            payload = {
+                "message": f"Auto-update {datetime.now().isoformat()}",
+                "content": encoded,
+                "sha": sha,
+                "branch": "main"
+            }
+            
+            # Отправляем обновление
+            async with session.put(url, headers=headers, json=payload) as resp:
+                if resp.status in [200, 201]:
+                    logging.info("✅ Данные сохранены в GitHub")
+                    return True
+                else:
+                    error = await resp.text()
+                    logging.error(f"❌ Ошибка сохранения: {resp.status} - {error}")
+                    return False
+    except Exception as e:
+        logging.error(f"❌ Ошибка GitHub API: {e}")
+        return False
 
 # === ЛОГИРОВАНИЕ ===
-async def log_action(action, user_id=None, details=""):
-    """Отправить лог в канал"""
+async def log_to_channel(text):
+    """Отправить лог в Telegram канал"""
     try:
-        text = f"📊 {action}\n"
-        if user_id:
-            user = user_data.get(str(user_id), {})
-            username = user.get('username', 'без username')
-            text += f"👤 ID: {user_id} (@{username})\n"
-        if details:
-            text += f"📝 {details}\n"
-        text += f"🕐 {datetime.now().strftime('%H:%M:%S')}"
-        
-        await bot.send_message(LOG_CHANNEL, text)
+        await bot.send_message(LOG_CHANNEL, text[:4000])
     except Exception as e:
-        logging.error(f"❌ Ошибка логирования: {e}")
+        logging.error(f"❌ Ошибка отправки лога: {e}")
 
-# === КОМАНДЫ БОТА ===
+# === ОСНОВНЫЕ КОМАНДЫ ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
@@ -161,7 +159,7 @@ async def cmd_start(message: types.Message):
     
     user_id_str = str(user_id)
     
-    # Регистрация/обновление пользователя
+    # Регистрация нового пользователя
     if user_id_str not in user_data:
         user_data[user_id_str] = {
             "id": user_id,
@@ -187,13 +185,14 @@ async def cmd_start(message: types.Message):
             "is_banned": False,
             "is_admin": user_id in ADMIN_IDS
         }
-        await log_action("🆕 НОВЫЙ ПОЛЬЗОВАТЕЛЬ", user_id, f"{first_name} (@{username})")
+        await log_to_channel(f"🆕 НОВЫЙ ПОЛЬЗОВАТЕЛЬ\nID: {user_id}\nИмя: {first_name}\nUsername: @{username}")
     else:
+        # Обновляем данные существующего пользователя
         user_data[user_id_str]['username'] = username
         user_data[user_id_str]['last_seen'] = datetime.now().isoformat()
     
     # Сохраняем данные
-    await save_to_github({"users": user_data, "friends": friends_data})
+    await save_to_github()
     
     # Приветственное сообщение
     welcome_text = f"""
@@ -211,7 +210,11 @@ async def cmd_start(message: types.Message):
 3. Общайся текстом, голосовыми, стикерами
 4. Добавляй понравившихся в друзья
 
-🎯 <b>Умный поиск</b> | 👥 <b>Система друзей</b> | 📊 <b>Статистика</b>
+🎯 <b>Функции:</b>
+• Умный поиск собеседников
+• Система друзей
+• Статистика и профиль
+• Админ-панель
 
 <b>Выбери действие:</b>
 """
@@ -231,19 +234,38 @@ async def cmd_start(message: types.Message):
 async def cmd_stop(message: types.Message):
     user_id = message.from_user.id
     
-    # Если в чате
     if user_id in active_chats:
         partner_id = active_chats[user_id]
         await end_chat(user_id, partner_id, "по команде /stop")
         await message.answer("✅ Диалог завершен.")
-    # Если в поиске
     elif user_id in active_searches:
         del active_searches[user_id]
         await message.answer("✅ Поиск отменен.")
     else:
         await message.answer("Вы не в диалоге и не в поиске.")
 
-# === КНОПКИ ===
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    total_users = len(user_data)
+    online_count = len([u for u in user_data.values() 
+                       if (datetime.now() - datetime.fromisoformat(u.get('last_seen', '2023-01-01'))).seconds < 300])
+    
+    stats_text = f"""
+📊 <b>Статистика {BOT_NAME}:</b>
+
+👥 <b>Пользователи:</b>
+• Всего: {total_users}
+• Онлайн: {online_count}
+• В поиске: {len(active_searches)}
+• В диалогах: {len(active_chats) // 2}
+
+💬 <b>Активность:</b>
+• Активных диалогов: {len(active_chats) // 2}
+"""
+    
+    await message.answer(stats_text)
+
+# === ОБРАБОТЧИКИ КНОПОК ===
 @dp.callback_query(F.data == "search_start")
 async def search_start(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -296,6 +318,11 @@ async def search_start(callback: types.CallbackQuery):
 async def profile_view(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     user = user_data.get(str(user_id), {})
+    
+    if not user:
+        await callback.answer("Сначала используйте /start", show_alert=True)
+        return
+    
     profile = user.get('profile', {})
     stats = user.get('stats', {})
     
@@ -321,8 +348,8 @@ async def profile_view(callback: types.CallbackQuery):
 """
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Редактировать", callback_data="profile_edit")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+        [InlineKeyboardButton(text="✏️ Редактировать профиль", callback_data="profile_edit")],
+        [InlineKeyboardButton(text="🔙 Назад в меню", callback_data="back_to_menu")]
     ])
     
     await callback.message.edit_text(profile_text, reply_markup=keyboard)
@@ -343,15 +370,17 @@ async def admin_panel(callback: types.CallbackQuery):
     admin_text = f"""
 🛠️ <b>Админ-панель {BOT_NAME}</b>
 
-<b>Статистика:</b>
+📈 <b>Статистика:</b>
 • Всего пользователей: {total_users}
 • Онлайн сейчас: {online_count}
 • Активных диалогов: {len(active_chats) // 2}
 • В поиске: {len(active_searches)}
+
+⚙️ <b>Управление:</b>
 """
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="📊 Полная статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
@@ -367,30 +396,32 @@ async def back_to_menu(callback: types.CallbackQuery):
 
 # === ФУНКЦИИ ЧАТА ===
 async def start_chat(user1_id, user2_id):
-    """Начать диалог"""
-    # Удаляем из поиска
+    """Начать диалог между двумя пользователями"""
+    # Убираем из поиска
     for uid in [user1_id, user2_id]:
         if uid in active_searches:
             del active_searches[uid]
     
-    # Регистрируем чат
+    # Регистрируем активный чат
     active_chats[user1_id] = user2_id
     active_chats[user2_id] = user1_id
     
-    # Обновляем статистику
+    # Обновляем статистику пользователей
     for uid in [user1_id, user2_id]:
         uid_str = str(uid)
         if uid_str in user_data:
             user_data[uid_str]['stats']['chats'] += 1
+    
+    await save_to_github()
     
     # Сообщения пользователям
     chat_text = """
 ✅ <b>Собеседник найден! Начинайте общение.</b>
 
 🎭 <b>Можно отправлять:</b>
-• Текст
+• Текстовые сообщения
 • Фото и видео
-• Голосовые
+• Голосовые сообщения
 • Стикеры и GIF
 
 🛡️ <b>Правила:</b>
@@ -398,40 +429,39 @@ async def start_chat(user1_id, user2_id):
 • Не спамьте
 • Не отправляйте запрещенный контент
 
-<b>Чтобы завершить - /stop</b>
+<b>Чтобы завершить диалог - /stop</b>
 """
     
     try:
         await bot.send_message(user1_id, chat_text)
         await bot.send_message(user2_id, chat_text)
         
-        await log_action("🔗 НАЧАЛСЯ ДИАЛОГ", None, f"{user1_id} ↔ {user2_id}")
+        await log_to_channel(f"🔗 НАЧАЛСЯ ДИАЛОГ\n{user1_id} ↔ {user2_id}")
     except Exception as e:
         logging.error(f"❌ Ошибка начала чата: {e}")
 
 async def end_chat(user1_id, user2_id, reason="неизвестно"):
     """Завершить диалог"""
-    # Удаляем из активных
+    # Удаляем из активных чатов
     for uid in [user1_id, user2_id]:
         if uid in active_chats:
             del active_chats[uid]
     
-    # Сообщения
-    end_text = "❌ <b>Диалог завершен.</b>\n\nИспользуй /start для нового поиска."
+    # Сообщения о завершении
+    end_text = "❌ <b>Диалог завершен.</b>\n\nИспользуйте /start для нового поиска."
     
     try:
         await bot.send_message(user1_id, end_text)
         await bot.send_message(user2_id, end_text)
         
-        # Кнопка "Добавить в друзья"
+        # Предложение добавить в друзья
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Добавить в друзья", callback_data=f"add_friend_{user2_id if user1_id == user1_id else user1_id}")]
+            [InlineKeyboardButton(text="➕ Добавить в друзья", callback_data=f"add_friend_{user2_id}")]
         ])
         
-        await bot.send_message(user1_id, "Хочешь добавить собеседника в друзья?", reply_markup=keyboard)
-        await bot.send_message(user2_id, "Хочешь добавить собеседника в друзья?", reply_markup=keyboard)
+        await bot.send_message(user1_id, "Хотите добавить собеседника в друзья?", reply_markup=keyboard)
         
-        await log_action("🔴 ДИАЛОГ ЗАВЕРШЕН", None, f"{user1_id} ↔ {user2_id}\nПричина: {reason}")
+        await log_to_channel(f"🔴 ДИАЛОГ ЗАВЕРШЕН\n{user1_id} ↔ {user2_id}\nПричина: {reason}")
     except Exception as e:
         logging.error(f"❌ Ошибка завершения чата: {e}")
 
@@ -450,7 +480,10 @@ async def handle_message(message: types.Message):
         
         # Логируем
         msg_preview = message.text or message.caption or f"[{message.content_type}]"
-        await log_action("📨 СООБЩЕНИЕ", user_id, f"→ {partner_id}\n{msg_preview[:50]}")
+        if len(msg_preview) > 50:
+            msg_preview = msg_preview[:50] + "..."
+        
+        await log_to_channel(f"📨 СООБЩЕНИЕ\nОт: {user_id}\nКому: {partner_id}\nТекст: {msg_preview}")
         
         try:
             # Пересылаем сообщение
@@ -466,17 +499,13 @@ async def handle_message(message: types.Message):
                 await bot.send_voice(partner_id, message.voice.file_id)
             elif message.sticker:
                 await bot.send_sticker(partner_id, message.sticker.file_id)
-            elif message.document:
-                await bot.send_document(partner_id, message.document.file_id,
-                                       caption=f"💬 <b>Собеседник:</b>\n{message.caption}" if message.caption else None)
         except Exception as e:
             await message.answer("❌ Не удалось отправить сообщение. Возможно, собеседник отключился.")
             if user_id in active_chats:
                 partner = active_chats[user_id]
                 await end_chat(user_id, partner, "ошибка отправки")
-    
-    # Если не в чате - показываем меню
-    elif message.text and not message.text.startswith('/'):
+    else:
+        # Если не в чате - показываем меню
         await cmd_start(message)
 
 # === ЗАПУСК БОТА ===
@@ -491,23 +520,18 @@ async def main():
     await start_web_server()
     
     # Запускаем keep-alive систему
-    asyncio.create_task(keep_alive())
+    asyncio.create_task(keep_alive_ping())
     
-    logging.info(f"=== Бот {BOT_NAME} запущен на Render ===")
-    logging.info(f"Админ: {ADMIN_IDS}")
-    logging.info(f"Пользователей в базе: {len(user_data)}")
+    # Информация о запуске
+    logging.info("=" * 50)
+    logging.info(f"🚀 Бот {BOT_NAME} запущен на Render")
+    logging.info(f"👑 Админ ID: {ADMIN_IDS}")
+    logging.info(f"📊 Пользователей в базе: {len(user_data)}")
+    logging.info(f"📨 Логи в канал: {LOG_CHANNEL}")
+    logging.info("=" * 50)
     
-    # Сообщение в канал логи
-    try:
-        await bot.send_message(
-            LOG_CHANNEL,
-            f"🚀 <b>{BOT_NAME} запущен на Render!</b>\n"
-            f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"Пользователей: {len(user_data)}\n"
-            f"Веб-сервер: :8080"
-        )
-    except:
-        pass
+    # Отправляем сообщение о запуске в канал
+    await log_to_channel(f"🚀 <b>{BOT_NAME} запущен на Render!</b>\nВремя: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\nПользователей: {len(user_data)}")
     
     # Запускаем бота
     await dp.start_polling(bot)
