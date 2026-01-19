@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: davincikk-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        value: 8400292600:AAEDv_L2A-xTFC2aiUn-2fOR4HNV4_iDMXo
+      - key: ADMIN_IDS
+        value: 7539197809
+      - key: LOG_CHANNEL
+        value: -1003620475629
+      - key: GITHUB_TOKEN
+        value: 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
+      - key: GITHUB_USERNAME
+        value: mirmahmedovf52-ui
+      - key: GITHUB_REPO
+        value: davincikk-6ot
+      - key: PYTHONUNBUFFERED
+        value: true
+    healthCheckPath: /health
+    autoDeploy: true
