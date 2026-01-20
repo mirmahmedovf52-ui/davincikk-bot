@@ -31,16 +31,14 @@ logging.basicConfig(level=logging.INFO)
 active_searches = {}
 active_chats = {}
 user_data = {}
-friends_data = {}
 
 # === КЛАВИАТУРЫ ===
 def get_main_keyboard(user_id: int):
-    """Главное меню - только работающие кнопки"""
+    """Главное меню"""
     buttons = [
         [KeyboardButton(text="🔍 Начать поиск")],
         [KeyboardButton(text="⏹️ Остановить")],
-        [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="📊 Статистика")],
-        [KeyboardButton(text="👥 Мои друзья")]
+        [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="📊 Статистика")]
     ]
     
     if user_id in ADMIN_IDS:
@@ -58,7 +56,7 @@ def get_profile_keyboard():
     ])
 
 def get_admin_keyboard():
-    """Клавиатура админа - только работающие функции"""
+    """Клавиатура админа"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton(text="📢 Рассылка всем", callback_data="admin_broadcast")],
@@ -96,7 +94,6 @@ async def save_data():
     try:
         data = {
             "users": user_data,
-            "friends": friends_data,
             "updated": datetime.now().isoformat()
         }
         with open("data.json", "w", encoding="utf-8") as f:
@@ -110,13 +107,11 @@ async def load_data():
         if os.path.exists("data.json"):
             with open("data.json", "r", encoding="utf-8") as f:
                 data = json.load(f)
-                global user_data, friends_data
+                global user_data
                 user_data = data.get("users", {})
-                friends_data = data.get("friends", {})
                 logging.info(f"✅ Данные загружены. Пользователей: {len(user_data)}")
     except:
         user_data = {}
-        friends_data = {}
 
 # === ЛОГИРОВАНИЕ ===
 async def log_action(action: str, user_id=None, details=""):
@@ -157,8 +152,7 @@ async def cmd_start(message: types.Message):
             },
             "stats": {
                 "chats": 0,
-                "messages": 0,
-                "friends": 0
+                "messages": 0
             }
         }
         await log_action("🆕 НОВЫЙ ПОЛЬЗОВАТЕЛЬ", user_id, f"{first_name} (@{username})")
@@ -178,17 +172,8 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("stop"))
 async def cmd_stop(message: types.Message):
-    user_id = message.from_user.id
-    
-    if user_id in active_chats:
-        partner_id = active_chats[user_id]
-        await end_chat(user_id, partner_id)
-        await message.answer("✅ Диалог завершен.", reply_markup=get_main_keyboard(user_id))
-    elif user_id in active_searches:
-        del active_searches[user_id]
-        await message.answer("✅ Поиск отменен.", reply_markup=get_main_keyboard(user_id))
-    else:
-        await message.answer("Вы не в диалоге и не в поиске.", reply_markup=get_main_keyboard(user_id))
+    """Команда /stop"""
+    await stop_dialog(message.from_user.id, message)
 
 # === ОБРАБОТЧИКИ КНОПОК ===
 @dp.message(F.text == "🔍 Начать поиск")
@@ -228,6 +213,42 @@ async def start_search_handler(message: types.Message):
                 await message.answer("😔 Собеседник не найден.")
                 del active_searches[user_id]
 
+@dp.message(F.text == "⏹️ Остановить")
+async def stop_button_handler(message: types.Message):
+    """Обработчик кнопки Остановить"""
+    user_id = message.from_user.id
+    await stop_dialog(user_id, message)
+
+async def stop_dialog(user_id: int, message: types.Message = None):
+    """Универсальная функция остановки"""
+    if user_id in active_chats:
+        partner_id = active_chats[user_id]
+        
+        # Завершаем у обоих
+        if partner_id in active_chats:
+            del active_chats[partner_id]
+            try:
+                await bot.send_message(partner_id, "❌ Собеседник завершил диалог.", 
+                                     reply_markup=get_main_keyboard(partner_id))
+            except:
+                pass
+        
+        del active_chats[user_id]
+        
+        if message:
+            await message.answer("✅ Диалог завершен.", reply_markup=get_main_keyboard(user_id))
+        
+        await log_action("🔴 ДИАЛОГ ЗАВЕРШЕН", user_id, f"с {partner_id}")
+    
+    elif user_id in active_searches:
+        del active_searches[user_id]
+        if message:
+            await message.answer("✅ Поиск отменен.", reply_markup=get_main_keyboard(user_id))
+    
+    else:
+        if message:
+            await message.answer("Вы не в диалоге и не в поиске.", reply_markup=get_main_keyboard(user_id))
+
 @dp.message(F.text == "👤 Мой профиль")
 async def profile_handler(message: types.Message):
     user_id = message.from_user.id
@@ -256,7 +277,6 @@ async def profile_handler(message: types.Message):
 <b>Статистика:</b>
 • Диалогов: {stats.get('chats', 0)}
 • Сообщений: {stats.get('messages', 0)}
-• Друзей: {stats.get('friends', 0)}
 """
     
     await message.answer(profile_text, reply_markup=get_profile_keyboard())
@@ -281,27 +301,6 @@ async def stats_handler(message: types.Message):
 """
     
     await message.answer(stats_text)
-
-@dp.message(F.text == "👥 Мои друзья")
-async def friends_handler(message: types.Message):
-    user_id = message.from_user.id
-    user_id_str = str(user_id)
-    
-    friends = friends_data.get(user_id_str, [])
-    
-    if not friends:
-        text = "👥 У вас пока нет друзей.\nДобавляйте понравившихся собеседников!"
-    else:
-        text = "👥 Ваши друзья:\n\n"
-        for friend_id in friends[:10]:
-            friend = user_data.get(friend_id, {})
-            name = friend.get('first_name', f'Пользователь {friend_id}')
-            text += f"• {name}\n"
-        
-        if len(friends) > 10:
-            text += f"\n...и еще {len(friends) - 10} друзей"
-    
-    await message.answer(text)
 
 @dp.message(F.text == "🛠️ Админ-панель")
 async def admin_panel_handler(message: types.Message):
@@ -339,21 +338,16 @@ async def help_handler(message: types.Message):
 
 <b>Кнопки:</b>
 • 🔍 Начать поиск - найти собеседника
-• ⏹️ Остановить - завершить диалог
+• ⏹️ Остановить - завершить диалог или поиск
 • 👤 Мой профиль - информация о вас
 • 📊 Статистика - статистика бота
-• 👥 Мои друзья - список друзей
+• 🛠️ Админ-панель - управление (админы)
 
 <b>Как общаться:</b>
 1. Нажмите "🔍 Начать поиск"
 2. Дождитесь собеседника
 3. Отправляйте текстовые сообщения, фото, видео
 4. Используйте "⏹️ Остановить" для завершения
-
-<b>Безопасность:</b>
-• Ваши данные защищены
-• Сообщения анонимны
-• Можно пожаловаться на нарушителей
 """
     
     await message.answer(help_text)
@@ -381,10 +375,6 @@ async def admin_stats_callback(callback: types.CallbackQuery):
 💬 <b>Активность:</b>
 • Всего диалогов: {total_chats}
 • Всего сообщений: {total_messages}
-• Среднее сообщений в диалоге: {total_messages // total_chats if total_chats > 0 else 0}
-
-🕐 <b>Время:</b>
-• Обновлено: {datetime.now().strftime('%H:%M:%S')}
 """
     
     await callback.message.answer(stats_text)
@@ -447,9 +437,6 @@ async def cmd_setgender(message: types.Message, command: CommandObject):
         return
     
     gender = command.args.lower()
-    if gender not in ["м", "ж", "мужской", "женский", "другой"]:
-        await message.answer("Используйте: м, ж или другой")
-        return
     
     if user_id_str in user_data:
         user_data[user_id_str]["profile"]["gender"] = gender
@@ -468,9 +455,6 @@ async def cmd_setage(message: types.Message, command: CommandObject):
         return
     
     age = int(command.args)
-    if age < 12 or age > 100:
-        await message.answer("Возраст должен быть от 12 до 100 лет")
-        return
     
     if user_id_str in user_data:
         user_data[user_id_str]["profile"]["age"] = age
@@ -528,20 +512,6 @@ async def start_chat(user1_id: int, user2_id: int):
         await bot.send_message(user2_id, chat_text, reply_markup=get_main_keyboard(user2_id))
         
         await log_action("🔗 НАЧАЛСЯ ДИАЛОГ", None, f"{user1_id} ↔ {user2_id}")
-    except:
-        pass
-
-async def end_chat(user1_id: int, user2_id: int):
-    """Завершить диалог"""
-    for uid in [user1_id, user2_id]:
-        if uid in active_chats:
-            del active_chats[uid]
-    
-    try:
-        await bot.send_message(user1_id, "❌ Диалог завершен.", reply_markup=get_main_keyboard(user1_id))
-        await bot.send_message(user2_id, "❌ Диалог завершен.", reply_markup=get_main_keyboard(user2_id))
-        
-        await log_action("🔴 ДИАЛОГ ЗАВЕРШЕН", None, f"{user1_id} ↔ {user2_id}")
     except:
         pass
 
@@ -605,9 +575,7 @@ async def handle_private_message(message: types.Message):
         except Exception as e:
             logging.error(f"Ошибка отправки: {e}")
             await message.answer("❌ Не удалось отправить сообщение.")
-            if user_id in active_chats:
-                partner = active_chats[user_id]
-                await end_chat(user_id, partner)
+            await stop_dialog(user_id)
 
 # === ЗАПУСК ===
 async def main():
